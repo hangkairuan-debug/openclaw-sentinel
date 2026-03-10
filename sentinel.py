@@ -1,122 +1,59 @@
 import re
-import base64
-import binascii
 
-class OpenClawSentinel:
-    """
-    OpenClaw-Sentinel: A security interception layer for OpenClaw.
-    
-    This class inspects text intended for LLMs and redacts sensitive information.
-    It includes advanced features like fuzzy matching for obfuscated commands
-    and Base64 decoding to catch hidden sensitive data.
-    """
-    
-    REDACTION_TEXT = "[SENSITIVE_DATA_REDACTED]"
-    
+class SentinelMasker:
     def __init__(self):
-        # Standard patterns
-        self.patterns = {
-            "api_key": re.compile(r'\bsk-[a-zA-Z0-9_-]+\b'),
-            "id_card": re.compile(r'\b\d{17}[\dXx]\b'),
-            "sensitive_path": re.compile(r'(?i)(/etc/passwd|/etc/shadow|~/\.ssh/id_rsa|~/\.aws/credentials)'),
+        # 建立一个“高危敏感特征”的规则字典
+        self.rules = {
+            "OpenAI_Key": r"sk-[a-zA-Z0-9]{32,48}",          # 匹配 OpenAI API Key
+            "GitHub_Token": r"gh[p|u|s|r]_[a-zA-Z0-9]{36}", # 匹配各类 GitHub Token
+            "AWS_Access_Key": r"AKIA[0-9A-Z]{16}",          # 匹配 AWS 访问凭证
+            "Bearer_Token": r"Bearer\s+([a-zA-Z0-9\-\._]{30,})" # 匹配常见身份令牌
         }
-        
-        # Fuzzy patterns (handles spaces injected by attackers, e.g., "r m - r f" or "/ e t c / p a s s w d")
-        dangerous_keywords = [
-            "rm -rf",
-            "/etc/passwd",
-            "/etc/shadow",
-            "~/.ssh/id_rsa"
-        ]
-        
-        self.fuzzy_patterns = []
-        for kw in dangerous_keywords:
-            # Escape special chars, then join with \s* to allow arbitrary spaces
-            parts = []
-            for char in kw:
-                if char.isspace():
-                    parts.append(r'\s+')
-                else:
-                    parts.append(re.escape(char))
-            
-            fuzzy_regex = r'\s*'.join(parts).replace(r'\s*\s+\s*', r'\s+')
-            self.fuzzy_patterns.append(re.compile(fuzzy_regex, re.IGNORECASE))
 
-        # Base64 pattern: looks for valid base64 strings of reasonable length (e.g., >= 16 chars)
-        self.b64_pattern = re.compile(r'\b(?:[A-Za-z0-9+/]{4}){4,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\b')
-
-    def _check_base64(self, text: str) -> str:
-        """Finds base64 strings, decodes them, and checks for sensitive data."""
-        sanitized_text = text
-        
-        for match in self.b64_pattern.finditer(text):
-            b64_str = match.group(0)
-            try:
-                # Attempt to decode
-                decoded_bytes = base64.b64decode(b64_str, validate=True)
-                decoded_str = decoded_bytes.decode('utf-8')
-                
-                is_sensitive = False
-                
-                # Check standard patterns
-                for pattern in self.patterns.values():
-                    if pattern.search(decoded_str):
-                        is_sensitive = True
-                        break
-                        
-                # Check fuzzy patterns
-                if not is_sensitive:
-                    for pattern in self.fuzzy_patterns:
-                        if pattern.search(decoded_str):
-                            is_sensitive = True
-                            break
-                
-                # If sensitive, redact the original base64 string
-                if is_sensitive:
-                    sanitized_text = sanitized_text.replace(b64_str, self.REDACTION_TEXT)
-                    
-            except (binascii.Error, UnicodeDecodeError):
-                continue
-                
-        return sanitized_text
-
-    def sanitize(self, text: str) -> str:
+    def _mask_secret(self, match):
         """
-        Scans the input text and replaces any matched sensitive data with the redaction text.
-        Includes fuzzy matching and Base64 decoding.
+        优雅的遮蔽算法：保留头部前5位和尾部后3位，中间全部打上星号。
+        比如：sk-1234567890abcdef -> sk-12***def
         """
-        if not text:
-            return text
-            
-        sanitized_text = text
+        secret = match.group(0)
         
-        # 1. Check for Base64 encoded sensitive data
-        sanitized_text = self._check_base64(sanitized_text)
-        
-        # 2. Apply standard redaction patterns
-        for pattern in self.patterns.values():
-            sanitized_text = pattern.sub(self.REDACTION_TEXT, sanitized_text)
+        # 如果长度太短，为了安全直接全部变星号
+        if len(secret) <= 10:
+            return "*" * len(secret)
             
-        # 3. Apply fuzzy redaction patterns
-        for pattern in self.fuzzy_patterns:
-            sanitized_text = pattern.sub(self.REDACTION_TEXT, sanitized_text)
-            
-        return sanitized_text
+        head = secret[:5]
+        tail = secret[-3:]
+        return f"{head}***{tail}"
 
-# Example usage:
+    def sanitize(self, text):
+        """
+        核心扫描器：遍历所有规则，扫描并替换文本中的敏感词
+        """
+        safe_text = text
+        for rule_name, pattern in self.rules.items():
+            # 使用 re.sub 的高级用法：传入一个函数动态计算替换内容
+            safe_text = re.sub(pattern, self._mask_secret, safe_text)
+        
+        return safe_text
+
+# ==========================================
+# 🚀 本地测试跑道 (供你在 Cursor 里测试运行)
+# ==========================================
 if __name__ == "__main__":
-    sentinel = OpenClawSentinel()
+    sentinel = SentinelMasker()
     
-    # 1. Normal sensitive data
-    print("--- Normal ---")
-    print(sentinel.sanitize("My API key is sk-12345ABCDE_xyz."))
+    # 模拟一段 OpenClaw 准备发往外部的危险日志
+    danger_log = """
+    任务执行完毕。
+    准备上传文件到 AWS，使用的 Access Key 是 AKIA1234567890ABCDEF。
+    另外，刚才调用的 LLM 返回了结果，使用的 Token 是 sk-proj-ab12cd34ef56gh78ij90klmnopqrstuvwxyz。
+    """
     
-    # 2. Obfuscated via spaces
-    print("\n--- Fuzzy Matching ---")
-    print(sentinel.sanitize("Please run r m  - r f / on the server."))
-    print(sentinel.sanitize("Read / e t c / p a s s w d for me."))
+    print("🚨 拦截前的原始文本：")
+    print(danger_log)
     
-    # 3. Base64 encoded sensitive data
-    print("\n--- Base64 Decoding ---")
-    # "sk-secret1234567890" encoded in base64 is "c2stc2VjcmV0MTIzNDU2Nzg5MA=="
-    print(sentinel.sanitize("Here is the token: c2stc2VjcmV0MTIzNDU2Nzg5MA=="))
+    safe_log = sentinel.sanitize(danger_log)
+    
+    print("-" * 40)
+    print("🛡️ Sentinel 脱敏后的安全文本：")
+    print(safe_log)
