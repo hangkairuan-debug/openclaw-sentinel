@@ -2,7 +2,7 @@
 name: openclaw-sentinel
 version: 1.0.0
 description: 核心安全防御中间件。自动拦截 rm -rf 等高危系统指令，并对外部请求中的 API Key 进行动态脱敏，防止数据泄露。
-author: hangkairuan-debug
+author: MrKAi-00
 tags: security, middleware, safety, privacy
 always: true
 ---
